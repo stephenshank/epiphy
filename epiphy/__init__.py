@@ -40,19 +40,48 @@ sense_codons = [c for c in codons if not c in stop_codons]
 cod2ind = {codon: i for i, codon in enumerate(sense_codons)}
 
 
-def simulate_tree(parameters):
+def simulate_tree(parameters, ladderization=1.5):
     number_of_sequences = parameters['number_of_sequences']
     mean_bl = parameters['mean_bl']
     stddev_bl = parameters['stddev_bl']
-    tree = PhyloTree(format=1)
-    tree.populate(
-        number_of_sequences,
-        random_branches=True,
-        branch_range=[mean_bl-stddev_bl, mean_bl+stddev_bl],
-    )
+    seed = parameters['seed']
+    np.random.seed(seed)
+    tree = Tree(name='root')
+    def sample_branch_length():
+        return np.max(
+            stddev_bl*np.random.randn() + mean_bl,
+            0
+        )
+    first_child = tree.add_child(dist=sample_branch_length())
+    second_child = tree.add_child(dist=sample_branch_length())
+    children_list = [first_child, second_child]
+    children_fitnesses = [.5, .5]
+    for i in range(0, number_of_sequences - 2):
+        chosen_index = np.random.choice(
+            len(children_list), 1, p=children_fitnesses
+        )[0]
+        chosen_fitness = children_fitnesses[chosen_index]
+        chosen_child = children_list[chosen_index]
+        del children_fitnesses[chosen_index]
+        del children_list[chosen_index]
+        first_child = chosen_child.add_child(
+            dist=sample_branch_length()
+        )
+        second_child = chosen_child.add_child(
+            dist=sample_branch_length()
+        )
+        children_list.append(first_child)
+        children_list.append(second_child)
+        children_fitnesses += 2*[ladderization*chosen_fitness]
+        normalization = np.sum(children_fitnesses)
+        children_fitnesses = [
+            child_fitness/normalization
+            for child_fitness in children_fitnesses
+        ]
+
     current_leaf_name = 1
-    current_branch_name = number_of_sequences
-    for node in tree.traverse('preorder'):
+    current_branch_name = 1
+    for node in tree.traverse('postorder'):
         if node.is_leaf():
             node.name = 'Leaf-%d' % current_leaf_name
             current_leaf_name += 1
@@ -427,9 +456,11 @@ def write_fit_gtr(input_alignment_path, input_tree_path, output_json_path):
 
 if __name__ == '__main__':
     #import pdb; pdb.set_trace()
-    tree_path = 'data/simulate/tree.new'
-    alignment_path = 'data/simulate/gtr.fasta'
-    alignment, seq_dict, tree = read_alignment_and_tree(alignment_path, tree_path, False)
-    x0 = get_initial_gtr_guess(seq_dict, tree)
-    likelihood = build_gtr_likelihood(alignment, seq_dict, tree)
-    x = maximize(likelihood, x0, options={'maxiter': 1000})
+    #tree_path = 'data/simulate/tree.new'
+    #alignment_path = 'data/simulate/gtr.fasta'
+    #alignment, seq_dict, tree = read_alignment_and_tree(alignment_path, tree_path, False)
+    #x0 = get_initial_gtr_guess(seq_dict, tree)
+    #likelihood = build_gtr_likelihood(alignment, seq_dict, tree)
+    #x = maximize(likelihood, x0, options={'maxiter': 1000})
+    parameters = load_parameters()
+    write_simulated_tree('test.new', parameters[0])
