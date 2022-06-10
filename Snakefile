@@ -7,6 +7,10 @@ all_parameters = load_parameters()
 parameters = all_parameters[0]
 
 
+rule all:
+  input:
+    "data/simulate/gtr.fasta"
+
 rule simulate_tree:
   output:
     "data/simulate/tree.new"
@@ -53,3 +57,4 @@ rule fit_gtr:
     "data/simulate/gtr.json"
   run:
     write_fit_gtr(input.alignment, input.tree, output[0])
+
