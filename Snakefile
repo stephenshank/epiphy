@@ -11,8 +11,14 @@ def params_from_wc(wc):
 
 
 rule all:
+
+rule gtr_fits:
   input:
     expand("data/simulate-{sim}/gtr.json", sim=range(len(parameters)))
+  output:
+    "data/gtr_simulation_fits.csv"
+  run:
+    harvest_results(input, output[0])
 
 rule simulate_tree:
   output:

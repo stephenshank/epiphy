@@ -495,12 +495,35 @@ def write_fit_gtr(input_alignment_path, input_tree_path, output_json_path):
         json.dump(result, json_file, indent=2)
 
 
+def harvest_results(input_jsons, output_csv):
+    csv_file = open(output_csv, 'w')
+    for i, json_path in enumerate(input_jsons):
+        with open(json_path) as json_file:
+            datum = json.load(json_file)
+        if i == 0:
+            fieldnames = {
+                key
+                for key, value in datum.items()
+                if type(value) != list and type(value) != dict
+            }
+            writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+            writer.writeheader()
+        row = {
+            key: value
+            for key, value in datum.items()
+            if key in fieldnames
+        }
+        writer.writerow(row)
+    csv_file.close()
+
+
 if __name__ == '__main__':
+    harvest_results(['data/simulate-0/gtr.json', 'data/simulate-1/gtr.json'], 'results.csv')
     #parameters = load_parameters()[0]
-    tree_path = 'data/simulate/tree.new'
-    alignment_path = 'data/simulate/gtr.fasta'
-    output_json_path = 'output.json'
-    write_fit_gtr(alignment_path, tree_path, output_json_path)
+    #tree_path = 'data/simulate/tree.new'
+    #alignment_path = 'data/simulate/gtr.fasta'
+    #output_json_path = 'output.json'
+    #write_fit_gtr(alignment_path, tree_path, output_json_path)
     #alignment, seq_dict, tree = read_alignment_and_tree(alignment_path, tree_path, False)
     #node_dict = build_node_dict(tree)
     #parameters['seq_dict'] = seq_dict
