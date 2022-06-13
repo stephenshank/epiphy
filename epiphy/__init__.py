@@ -6,6 +6,7 @@ import numpy as np
 from scipy.linalg import expm
 from scipy.optimize import minimize
 from scipy.optimize import minimize_scalar
+from scipy.optimize import fmin_l_bfgs_b
 from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
@@ -450,10 +451,30 @@ def get_initial_gtr_guess(seq_dict, tree):
     ])
 
 
+def numeric_gradient(f, n, h):
+    def gradient(x):
+        result = np.zeros(n)
+        for i in range(n):
+            x_copy = np.copy(x)
+            x_copy[i] += h
+            fph = f(x_copy)
+            x_copy[i] -= 2*h
+            fmh = f(x_copy)
+            result[i] = (fph-fmh)/(2*h)
+        return result
+    return gradient
+
+
 def maximize(f, x0, jac=None, method='Nelder-Mead', options={}):
     def g(x):
         return -f(x)
     return minimize(g, x0=x0, jac=jac, method=method, options=options)
+
+
+def minusf(f):
+    def mf(x):
+        return -f(x)
+    return mf
 
 
 def coordinate_objective(f, x0, i):
@@ -464,7 +485,7 @@ def coordinate_objective(f, x0, i):
     return objective
 
 
-def fit_gtr(alignment, tree, seq_dict, niter=100, verbosity=0):
+def gtr_coordinate_descent(alignment, tree, seq_dict, niter=100, verbosity=0):
     # coordinate descent
     likelihood = build_gtr_likelihood(alignment, seq_dict, tree, verbosity)
     x = get_initial_gtr_guess(seq_dict, tree)
@@ -481,14 +502,29 @@ def fit_gtr(alignment, tree, seq_dict, niter=100, verbosity=0):
     return x, history
 
 
-def write_fit_gtr(input_alignment_path, input_tree_path, output_json_path):
+def gtr_lbfgs(alignment, tree, seq_dict, niter=100, verbosity=0):
+    def callback(x):
+        print('Iteration...')
+    likelihood = build_gtr_likelihood(alignment, seq_dict, tree, verbosity)
+    x0 = get_initial_gtr_guess(seq_dict, tree)
+    bounds = len(x0) * [(0, np.inf)]
+    result = fmin_l_bfgs_b(minusf(likelihood), x0, approx_grad=True, bounds=bounds, callback=callback)
+    return result[0]
+
+
+def write_fit_gtr(input_alignment_path, input_tree_path, output_json_path, method='lbfgs'):
     alignment, seq_dict, tree = read_alignment_and_tree(
         input_alignment_path, input_tree_path, False
     )
-    x, history = fit_gtr(alignment, tree, seq_dict, 1, 1)
+    if method=='lbfgs':
+        history = None
+        x = gtr_lbfgs(alignment, tree, seq_dict)
+    else:
+        x, history = fit_gtr(alignment, tree, seq_dict, 1, 1)
     node_dict = build_node_dict(tree)
     result = gtr_vector2dict(x, node_dict)
-    result['history'] = history
+    if not history is None:
+        result['history'] = history
     with open(output_json_path, 'w') as json_file:
         json.dump(result, json_file, indent=2)
 
@@ -516,12 +552,12 @@ def harvest_results(input_jsons, output_csv):
 
 
 if __name__ == '__main__':
-    harvest_results(['data/simulate-0/gtr.json', 'data/simulate-1/gtr.json'], 'results.csv')
+    #harvest_results(['data/simulate-0/gtr.json', 'data/simulate-1/gtr.json'], 'results.csv')
     #parameters = load_parameters()[0]
-    #tree_path = 'data/simulate/tree.new'
-    #alignment_path = 'data/simulate/gtr.fasta'
-    #output_json_path = 'output.json'
-    #write_fit_gtr(alignment_path, tree_path, output_json_path)
+    tree_path = 'data/simulate-0/tree.new'
+    alignment_path = 'data/simulate-0/gtr.fasta'
+    output_json_path = 'output.json'
+    write_fit_gtr(alignment_path, tree_path, output_json_path)
     #alignment, seq_dict, tree = read_alignment_and_tree(alignment_path, tree_path, False)
     #node_dict = build_node_dict(tree)
     #parameters['seq_dict'] = seq_dict
