@@ -485,8 +485,6 @@ def write_fit_gtr(input_alignment_path, input_tree_path, output_json_path):
     alignment, seq_dict, tree = read_alignment_and_tree(
         input_alignment_path, input_tree_path, False
     )
-    likelihood = build_gtr_likelihood(alignment, seq_dict, tree, verbosity=1)
-    x0 = get_initial_gtr_guess(seq_dict, tree)
     x, history = fit_gtr(alignment, tree, seq_dict, 1, 1)
     node_dict = build_node_dict(tree)
     result = gtr_vector2dict(x, node_dict)
