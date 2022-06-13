@@ -1,4 +1,4 @@
-name: epistasis
+name: epiphy
 channels:
   - conda-forge
   - bioconda
@@ -255,4 +255,4 @@ dependencies:
   - zstd=1.5.2=hd705a24_1
   - pip:
     - pyqt5-sip==12.9.0
-prefix: /Users/sshank/software/miniconda3/envs/epistasis
+prefix: /Users/sshank/software/miniconda3/envs/epiphy

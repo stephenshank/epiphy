@@ -5,6 +5,7 @@ import csv
 import numpy as np
 from scipy.linalg import expm
 from scipy.optimize import minimize
+from scipy.optimize import minimize_scalar
 from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
@@ -48,10 +49,10 @@ def simulate_tree(parameters, ladderization=1.5):
     np.random.seed(seed)
     tree = Tree(name='root')
     def sample_branch_length():
-        return np.max(
+        return np.max([
             stddev_bl*np.random.randn() + mean_bl,
             0
-        )
+        ])
     first_child = tree.add_child(dist=sample_branch_length())
     second_child = tree.add_child(dist=sample_branch_length())
     children_list = [first_child, second_child]
@@ -390,7 +391,7 @@ def build_node_dict(tree):
     return node_dict
 
 
-def build_gtr_likelihood(alignment, seq_dict, tree, verbose=True):
+def build_gtr_likelihood(alignment, seq_dict, tree, verbosity=0):
     freq = position_specific_empirical_nucleotide_frequencies(alignment)
     node_dict = build_node_dict(tree)
     def likelihood(x):
@@ -410,12 +411,28 @@ def build_gtr_likelihood(alignment, seq_dict, tree, verbose=True):
         parameters['CT'] = x[3]
         parameters['GT'] = x[4]
         branch_lengths = x[5:]
-        if verbose:
+        l = gtr_prune(parameters, tree, branch_lengths)
+        if verbosity > 0:
+            print('Log likelihood:', l)
+        if verbosity > 1:
             for k, v in parameters.items():
                 print('%s: %s\n' % (str(k), str(v)))
             print('\n----------\n')
-        return gtr_prune(parameters, tree, branch_lengths)
+        return l
     return likelihood
+
+
+def gtr_vector2dict(x, node_dict):
+    parameters = {}
+    parameters['AC'] = x[0]
+    parameters['AG'] = 1
+    parameters['AT'] = x[1]
+    parameters['CG'] = x[2]
+    parameters['CT'] = x[3]
+    parameters['GT'] = x[4]
+    for node_name, node_index in node_dict.items():
+        parameters[node_name] = x[node_index]
+    return parameters
 
 
 def get_initial_gtr_guess(seq_dict, tree):
@@ -439,28 +456,60 @@ def maximize(f, x0, jac=None, method='Nelder-Mead', options={}):
     return minimize(g, x0=x0, jac=jac, method=method, options=options)
 
 
-def gtr_gradient(alignment, tree):
-    def gradient(x):
-        pass
-    return gradient
+def coordinate_objective(f, x0, i):
+    x = np.copy(x0)
+    def objective(xi):
+        x[i] = xi
+        return -f(x)
+    return objective
 
 
-def fit_gtr(alignment, tree, initial_guess):
-    x = minimize(f, x0=[0, 0], method='Nelder-Mead')
-    pass
+def fit_gtr(alignment, tree, seq_dict, niter=100, verbosity=0):
+    # coordinate descent
+    likelihood = build_gtr_likelihood(alignment, seq_dict, tree, verbosity)
+    x = get_initial_gtr_guess(seq_dict, tree)
+    history = []
+    for iter in range(niter):
+        for i in range(len(x)):
+            f_i = coordinate_objective(likelihood, x, i)
+            result = minimize_scalar(f_i, bounds=(0, 5), method='bounded')
+            xi = result.x
+            x[i] = xi
+        current_value = -result.fun
+        print('Iteration %d, likelihood=%.10f' % (iter+1, current_value))
+        history.append(current_value)
+    return x, history
 
 
 def write_fit_gtr(input_alignment_path, input_tree_path, output_json_path):
-    pass
+    alignment, seq_dict, tree = read_alignment_and_tree(
+        input_alignment_path, input_tree_path, False
+    )
+    likelihood = build_gtr_likelihood(alignment, seq_dict, tree, verbosity=1)
+    x0 = get_initial_gtr_guess(seq_dict, tree)
+    x, history = fit_gtr(alignment, tree, seq_dict, 1, 1)
+    node_dict = build_node_dict(tree)
+    result = gtr_vector2dict(x, node_dict)
+    result['history'] = history
+    with open(output_json_path, 'w') as json_file:
+        json.dump(result, json_file, indent=2)
 
 
 if __name__ == '__main__':
-    #import pdb; pdb.set_trace()
-    #tree_path = 'data/simulate/tree.new'
-    #alignment_path = 'data/simulate/gtr.fasta'
+    #parameters = load_parameters()[0]
+    tree_path = 'data/simulate/tree.new'
+    alignment_path = 'data/simulate/gtr.fasta'
+    output_json_path = 'output.json'
+    write_fit_gtr(alignment_path, tree_path, output_json_path)
     #alignment, seq_dict, tree = read_alignment_and_tree(alignment_path, tree_path, False)
+    #node_dict = build_node_dict(tree)
+    #parameters['seq_dict'] = seq_dict
+    #parameters['node_dict'] = node_dict
+    #likelihood = build_gtr_likelihood(alignment, seq_dict, tree, verbosity=1)
     #x0 = get_initial_gtr_guess(seq_dict, tree)
+    #f_0 = coordinate_objective(likelihood, x0, 1)
+    #print('True likelihood:', gtr_prune(parameters, tree))
+    #x, history = fit_gtr(alignment, tree, 1, 1)
+    #result = gtr_vector2dict(x, node_dict)
     #likelihood = build_gtr_likelihood(alignment, seq_dict, tree)
     #x = maximize(likelihood, x0, options={'maxiter': 1000})
-    parameters = load_parameters()
-    write_simulated_tree('test.new', parameters[0])
