@@ -10,8 +10,6 @@ def params_from_wc(wc):
   return parameters[int(wc)]
 
 
-rule all:
-
 rule gtr_fits:
   input:
     expand("data/simulate-{sim}/gtr.json", sim=range(len(parameters)))
@@ -67,3 +65,6 @@ rule fit_gtr:
   run:
     write_fit_gtr(input.alignment, input.tree, output[0])
 
+rule all:
+  input:
+    rules.gtr_fits.output[0]

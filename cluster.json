@@ -1,0 +1,7 @@
+{"__default__": 
+  {
+    "nodes": 1,
+    "ppn": 1,
+    "name":"epyc2"
+  }
+}
