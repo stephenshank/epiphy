@@ -12,9 +12,17 @@ def params_from_wc(wc):
 
 rule gtr_fits:
   input:
-    expand("data/simulate-{sim}/gtr.json", sim=range(len(parameters)))
+    expand("data/simulate-{sim}/gtr_to_gtr.json", sim=range(len(parameters)))
   output:
     "data/gtr_simulation_fits.csv"
+  run:
+    harvest_results(input, output[0])
+
+rule mg94_fits:
+  input:
+    expand("data/simulate-{sim}/mg94_to_mg94.json", sim=range(len(parameters)))
+  output:
+    "data/mg94_simulation_fits.csv"
   run:
     harvest_results(input, output[0])
 
@@ -86,4 +94,5 @@ rule fit_mg94_to_mg94:
 
 rule all:
   input:
-    rules.gtr_fits.output[0]
+    rules.gtr_fits.output[0],
+    rules.mg94_fits.output[0]
