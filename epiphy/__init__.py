@@ -3,6 +3,7 @@ import itertools as it
 import csv
 
 import numpy as np
+import scipy.sparse as spsp
 from scipy.linalg import expm
 from scipy.optimize import minimize
 from scipy.optimize import minimize_scalar
@@ -108,8 +109,10 @@ def generic_parser(record):
 def codon_parser(record):
     error_message = 'Alignment length not a multiple of 3'
     assert len(record.seq) % 3 == 0, error_message
-    for i in range(0, len(record.seq), 3):
-        return cod2ind[str(record.seq[i:i+3])]
+    return np.array([
+        cod2ind[str(record.seq[i:i+3])]
+        for i in range(0, len(record.seq), 3)
+    ], dtype=int)
 
 
 def ef_key(nucleotide, i):
@@ -132,20 +135,44 @@ def calculate_pi_stop(parameters):
 
 def f3x4(parameters):
     pi_stop = calculate_pi_stop(parameters)
-    ef = []
+    codon_ef = []
+    error_message = 'Nucleotide frequencies at position %d do not sum to 1'
+    pi_sums = np.zeros(3)
+    for nucleotide, pos in it.product(nucleotides, (0, 1, 2)):
+        key = ef_key(nucleotide, pos) 
+        nuc_ef = parameters[key]
+        pi_sums[pos] += nuc_ef
+    assert np.abs(1-pi_sums[0]) < 1e-8, error_message % 1
+    assert np.abs(1-pi_sums[1]) < 1e-8, error_message % 2
+    assert np.abs(1-pi_sums[2]) < 1e-8, error_message % 3
     for codon in sense_codons:
         term = 1
         for i, nucleotide in enumerate(codon):
             key = ef_key(nucleotide, i) 
             term *= parameters[key]
-        ef.append(term/(1-pi_stop))
+        codon_ef.append(term/(1-pi_stop))
+    ef_np = np.array(codon_ef, dtype=float)
     error_message = 'F3x4 estimator does not sum to 1'
-    ef_np = np.array(ef, dtype=float)
     assert np.abs(1-np.sum(ef_np)) < 1e-8, error_message
     return ef_np
 
 
-def position_specific_empirical_nucleotide_frequencies(alignment):
+def psenf_from_codons(alignment):
+    n_seq, n_site = alignment.shape
+    F = np.zeros((4, 3))
+    count = 0
+    for i in range(n_seq):
+        for j in range(n_site):
+            codon = sense_codons[alignment[i, j]]
+            count += 1
+            for i, nuc in enumerate(codon):
+                F[nuc2ind[nuc], i] += 1
+    return F / count
+
+
+def position_specific_empirical_nucleotide_frequencies(alignment, is_codon=False):
+    if is_codon:
+        return psenf_from_codons(alignment)
     F = np.zeros((4, 3))
     total = alignment.shape[0]*alignment.shape[1] // 3
     for nucleotide in range(4):
@@ -520,7 +547,7 @@ def write_fit_gtr(input_alignment_path, input_tree_path, output_json_path, metho
         history = None
         x = gtr_lbfgs(alignment, tree, seq_dict)
     else:
-        x, history = fit_gtr(alignment, tree, seq_dict, 1, 1)
+        x, history = gtr_coordinate_descent(alignment, tree, seq_dict, 1, 1)
     node_dict = build_node_dict(tree)
     result = gtr_vector2dict(x, node_dict)
     if not history is None:
@@ -551,14 +578,142 @@ def harvest_results(input_jsons, output_csv):
     csv_file.close()
 
 
+def mg94_prune(parameters, tree):
+    Q = mg94_matrix(parameters)
+    number_of_sites = parameters['number_of_sites']
+    number_of_sequences = parameters['number_of_sequences']
+    S = parameters['S']
+    L = np.zeros((61, number_of_sites, 2*number_of_sequences-1))
+    all_sequence_indices = np.arange(number_of_sites)
+    seq_dict = parameters['seq_dict']
+    for node in tree.traverse('postorder'):
+        node_index = get_node_index(parameters, node)
+        if node.is_leaf():
+            L[seq_dict[node.name], all_sequence_indices, node_index] = 1
+        else:
+            for i, child in enumerate(node.children):
+                child_index = get_node_index(parameters, child)
+                t = S*child.dist
+                P = expm(t*Q)
+                if i == 0:
+                    L[:, :, node_index] = np.dot(P, L[:, :, child_index])
+                else:
+                    L[:, :, node_index] *= np.dot(P, L[:, :, child_index])
+        if node.is_root():
+            pi = f3x4(parameters)
+            l0 = np.dot(pi, L[:, :, node_index])
+            return np.sum(np.log(l0))
+
+
+def build_mg94_likelihood(alignment, seq_dict, tree, verbosity=0):
+    freq = position_specific_empirical_nucleotide_frequencies(alignment, True)
+    node_dict = build_node_dict(tree)
+    def likelihood(x):
+        parameters = {
+            'number_of_sequences': alignment.shape[0],
+            'number_of_sites': alignment.shape[1],
+            'seq_dict': seq_dict,
+            'node_dict': node_dict
+        }
+        for nuc in range(4):
+            for pos in range(3):
+                parameters[ef_key(nuc, pos)] = freq[nuc, pos]
+        parameters['AC'] = x[0]
+        parameters['AG'] = 1
+        parameters['AT'] = x[1]
+        parameters['CG'] = x[2]
+        parameters['CT'] = x[3]
+        parameters['GT'] = x[4]
+        parameters['omega'] = x[5]
+        parameters['S'] = x[6]
+        l = mg94_prune(parameters, tree)
+        if verbosity > 0:
+            print('Log likelihood:', l)
+        if verbosity > 1:
+            for k, v in parameters.items():
+                print('%s: %s\n' % (str(k), str(v)))
+            print('\n----------\n')
+        return l
+    return likelihood
+
+
+def mg94_vector2dict(x, node_dict):
+    parameters = {}
+    parameters['AC'] = x[0]
+    parameters['AG'] = 1
+    parameters['AT'] = x[1]
+    parameters['CG'] = x[2]
+    parameters['CT'] = x[3]
+    parameters['GT'] = x[4]
+    parameters['omega'] = x[5]
+    parameters['S'] = x[5]
+    for node_name, node_index in node_dict.items():
+        parameters[node_name] = x[node_index]
+    return parameters
+
+
+def get_initial_mg94_guess(seq_dict, tree, gtr_result):
+    number_of_sequences = len(seq_dict)
+    n_branch_lengths = 2*number_of_sequences - 2
+    node_dict = build_node_dict(tree)
+    branch_lengths = np.zeros(n_branch_lengths)
+    for node in tree.traverse('postorder'):
+        if not node.is_root():
+            node_index = node_dict[node.name]
+            branch_lengths[node_index] = gtr_result[node.name]
+    return np.hstack([
+        .25*np.ones(5),
+        np.ones(2),
+        branch_lengths
+    ])
+
+
+def mg94_lbfgs(alignment, tree, seq_dict, gtr_result, niter=100, verbosity=0):
+    def callback(x):
+        print('Iteration...')
+    likelihood = build_mg94_likelihood(alignment, seq_dict, tree, verbosity)
+    x0 = get_initial_mg94_guess(seq_dict, tree, gtr_result)
+    bounds = len(x0) * [(0, np.inf)]
+    result = fmin_l_bfgs_b(minusf(likelihood), x0, approx_grad=True, bounds=bounds, callback=callback)
+    return result[0]
+
+
+def synchronize_tree_and_results(tree, results):
+    for node in tree.traverse('postorder'):
+        node_name = node.name if not node.is_root() else 'root'
+        node.dist = results[node_name]
+
+
+def write_fit_mg94(input_alignment_path, input_tree_path, input_gtr_json_path,
+        output_json_path, method='lbfgs'):
+    alignment, seq_dict, tree = read_alignment_and_tree(
+        input_alignment_path, input_tree_path
+    )
+    with open(input_gtr_json_path) as json_file:
+        gtr_result = json.load(json_file)
+    synchronize_tree_and_results(tree, gtr_result)
+    x = mg94_lbfgs(alignment, tree, seq_dict, gtr_result)
+    node_dict = build_node_dict(tree)
+    result = mg94_vector2dict(x, node_dict)
+    with open(output_json_path, 'w') as json_file:
+        json.dump(result, json_file, indent=2)
+
+
+def dicodon_matrix(parameters, model='pm'):
+    I = spsp.speye(61).to_csr()
+    C = mg94_matrix(parameters)
+
 if __name__ == '__main__':
     #harvest_results(['data/simulate-0/gtr.json', 'data/simulate-1/gtr.json'], 'results.csv')
-    #parameters = load_parameters()[0]
+    parameters = load_parameters()[0]
     tree_path = 'data/simulate-0/tree.new'
-    alignment_path = 'data/simulate-0/gtr.fasta'
+    alignment_path = 'data/simulate-0/mg94.fasta'
+    gtr_path = 'data/simulate-0/gtr_to_mg94.json'
     output_json_path = 'output.json'
-    write_fit_gtr(alignment_path, tree_path, output_json_path)
-    #alignment, seq_dict, tree = read_alignment_and_tree(alignment_path, tree_path, False)
+    #alignment, seq_dict, tree = read_alignment_and_tree(
+    #    alignment_path, tree_path, False
+    #)
+    write_fit_mg94(alignment_path, tree_path, gtr_path, output_json_path)
     #node_dict = build_node_dict(tree)
     #parameters['seq_dict'] = seq_dict
     #parameters['node_dict'] = node_dict

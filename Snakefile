@@ -56,14 +56,33 @@ rule filter_out_interior_mg94_nodes:
   run:
     filter_simulated_alignment(input[0], output[0])
 
-rule fit_gtr:
+rule fit_gtr_to_gtr:
   input:
-    alignment=rules.simulate_full_gtr_alignment.output[0],
+    alignment=rules.filter_out_interior_gtr_nodes.output[0],
     tree=rules.simulate_tree.output[0]
   output:
-    "data/simulate-{sim}/gtr.json"
+    "data/simulate-{sim}/gtr_to_gtr.json"
   run:
     write_fit_gtr(input.alignment, input.tree, output[0])
+
+rule fit_gtr_to_mg94:
+  input:
+    alignment=rules.filter_out_interior_mg94_nodes.output[0],
+    tree=rules.simulate_tree.output[0]
+  output:
+    "data/simulate-{sim}/gtr_to_mg94.json"
+  run:
+    write_fit_gtr(input.alignment, input.tree, output[0])
+
+rule fit_mg94_to_mg94:
+  input:
+    alignment=rules.filter_out_interior_mg94_nodes.output[0],
+    tree=rules.simulate_tree.output[0],
+    gtr_fit=rules.fit_gtr_to_mg94.output[0]
+  output:
+    "data/simulate-{sim}/mg94_to_mg94.json"
+  run:
+    write_fit_mg94(input.alignment, input.tree, input.gtr_fit, output[0])
 
 rule all:
   input:
