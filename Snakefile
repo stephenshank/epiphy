@@ -108,6 +108,15 @@ rule filter_out_interior_epifel_nodes:
   run:
     filter_simulated_alignment(input[0], output[0])
 
+rule simulated_epifel_fna:
+  input:
+    tree=rules.simulate_tree.output[0],
+    alignment=rules.filter_out_interior_epifel_nodes.output[0]
+  output:
+    "data/simulate-{sim}/epifel.fna"
+  shell:
+    "cat {input.alignment} {input.tree} > {output}"
+
 rule all:
   input:
     rules.gtr_fits.output[0],
