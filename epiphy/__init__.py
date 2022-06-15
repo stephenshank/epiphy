@@ -40,6 +40,8 @@ nuc2ind = { 'A': 0, 'C': 1, 'G': 2, 'T': 3 }
 codons = [''.join(c) for c in it.product(nucleotides, repeat=3)]
 stop_codons = ['TAA', 'TAG', 'TGA']
 sense_codons = [c for c in codons if not c in stop_codons]
+dicodons = [d[0] + d[1] for d in it.product(sense_codons, sense_codons)]
+di2ind = {dicodon: i for i, dicodon in enumerate(dicodons)}
 cod2ind = {codon: i for i, codon in enumerate(sense_codons)}
 cod2aa = {codon: str(Seq(codon).translate()) for codon in sense_codons}
 aa_charges = {
@@ -795,17 +797,86 @@ def opposite_charge_epistatic_matrix(parameters):
     return D
 
 
+def krylov_subpace_exponential(A, b, iter=50):
+    dim = A.shape[0]
+    V = np.zeros((dim, iter+1))
+    beta = np.linalg.norm(b)
+    V[:, 0] = b / beta
+    H = np.zeros((iter+1, iter))
+
+    for j in range(iter):
+        w = A.dot(V[:, j])
+        for i in range(1, j):
+            H[i, j] = np.dot(w, V[:, i])
+            w = w - H[i, j] * V[:, i]
+        H[j+1, j] = np.linalg.norm(w)
+        if np.abs(H[j+1, j]) < 1e-12:
+            e = np.zeros(j)
+            e[0] = 1
+            x = beta*np.dot(V[:, :j], np.dot(expm(H[:j, :j]), e) )
+            return x
+        V[:, j+1] = w / H[j+1, j]
+        e = np.zeros(j+1)
+        e[0] = 1
+    x = beta*np.dot(V[:, :iter], np.dot(expm(H[:iter, :iter]), e) )
+    return x
+
+
+def simulate_epifel_root(parameters):
+    pi = f3x4(parameters)
+    root = np.random.choice(61, 2, p=pi)
+    dicodon = sense_codons[root[0]] + sense_codons[root[1]]
+    dicodon_index = di2ind[dicodon]
+    return dicodon_index
+
+
+def normalize(p):
+    return p / p.sum()
+
+
+def simulate_epifel(parameters, tree, seed=1):
+    np.random.seed(seed)
+    seq_dict = {}
+    records = []
+    root = simulate_epifel_root(parameters)
+    Q = opposite_charge_epistatic_matrix(parameters).transpose().tocsc()
+    for node in tree.traverse('preorder'):
+        if node.is_root():
+            seq_dict[node.name] = root
+        else:
+            parent_sequence = seq_dict[node.up.name]
+            if node.dist < 1e-12:
+                new_sequence = parent_sequence
+            else:
+                e = np.zeros(len(dicodons))
+                e[parent_sequence] = 1
+                p = krylov_subpace_exponential(node.dist*Q, e)
+                new_sequence = np.random.choice(len(dicodons), 1, p=normalize(p))[0]
+            seq_dict[node.name] = new_sequence
+            sequence = dicodons[new_sequence]
+            record = SeqRecord(Seq(sequence), id=node.name, description='')
+            records.append(record)
+    return records
+
+
+def write_epifel_simulation(input_tree_path, alignment_path, parameters):
+    tree = Tree(input_tree_path, format=1)
+    records = simulate_epifel(parameters, tree)
+    SeqIO.write(records, alignment_path, 'fasta')
+
+
 if __name__ == '__main__':
     #harvest_results(['data/simulate-0/gtr.json', 'data/simulate-1/gtr.json'], 'results.csv')
-    parameters = load_parameters()[0]
-    D = opposite_charge_epistatic_matrix(parameters)
-    #tree_path = 'data/simulate-0/tree.new'
-    #alignment_path = 'data/simulate-0/mg94.fasta'
+    parameters = load_parameters()[19]
+    #D = opposite_charge_epistatic_matrix(parameters)
+    alignment_path = 'data/simulate-0/mg94.fasta'
+    tree_path = 'data/simulate-0/tree.new'
+    alignment, seq_dict, tree = read_alignment_and_tree(
+        alignment_path, tree_path, False
+    )
+    simulate_epifel(parameters, tree)
     #gtr_path = 'data/simulate-0/gtr_to_mg94.json'
     #output_json_path = 'output.json'
-    #alignment, seq_dict, tree = read_alignment_and_tree(
-    #    alignment_path, tree_path, False
-    #)
     #write_fit_mg94(alignment_path, tree_path, gtr_path, output_json_path)
     #node_dict = build_node_dict(tree)
     #parameters['seq_dict'] = seq_dict

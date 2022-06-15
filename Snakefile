@@ -92,6 +92,22 @@ rule fit_mg94_to_mg94:
   run:
     write_fit_mg94(input.alignment, input.tree, input.gtr_fit, output[0])
 
+rule simulate_full_epifel_alignment:
+  input:
+    rules.simulate_tree.output[0]
+  output:
+    "data/simulate-{sim}/epifel_full.fasta"
+  run:
+    write_epifel_simulation(input[0], output[0], params_from_wc(wildcards.sim))
+
+rule filter_out_interior_epifel_nodes:
+  input:
+    rules.simulate_full_epifel_alignment.output[0]
+  output:
+    "data/simulate-{sim}/epifel.fasta"
+  run:
+    filter_simulated_alignment(input[0], output[0])
+
 rule all:
   input:
     rules.gtr_fits.output[0],
