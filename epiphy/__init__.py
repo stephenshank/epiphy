@@ -41,6 +41,13 @@ codons = [''.join(c) for c in it.product(nucleotides, repeat=3)]
 stop_codons = ['TAA', 'TAG', 'TGA']
 sense_codons = [c for c in codons if not c in stop_codons]
 cod2ind = {codon: i for i, codon in enumerate(sense_codons)}
+cod2aa = {codon: str(Seq(codon).translate()) for codon in sense_codons}
+aa_charges = {
+    'R': '+', 'H': '+', 'K': '+', 'D': '-', 'E': '-',
+    'S': 'n', 'T': 'n', 'N': 'n', 'Q': 'n', 'C': 'n',
+    'G': 'n', 'P': 'n', 'A': 'n', 'V': 'n', 'I': 'n',
+    'L': 'n', 'M': 'n', 'F': 'n', 'Y': 'n', 'W': 'n'
+}
 
 
 def simulate_tree(parameters, ladderization=1.5):
@@ -699,21 +706,107 @@ def write_fit_mg94(input_alignment_path, input_tree_path, input_gtr_json_path,
         json.dump(result, json_file, indent=2)
 
 
-def dicodon_matrix(parameters, model='pm'):
-    I = spsp.speye(61).to_csr()
+def independent_dicodon_matrix(parameters):
+    I = spsp.eye(61).tocsr()
     C = mg94_matrix(parameters)
+    D = spsp.kron(C, I) + spsp.kron(I, C)
+    return D
+
+
+def get_row_and_column_indices(D):
+    row_indices = D.indices
+    column_indices = np.zeros(len(D.indices), dtype=int)
+    for i in range(len(D.indptr)):
+        start_index = D.indptr[i]
+        if i != len(D.indptr) - 1:
+            stop_index = D.indptr[i+1]
+            column_indices[start_index: stop_index] = i
+        else:
+            column_indices[start_index:] = i
+    return row_indices, column_indices
+
+
+def markovize(sparse_matrix):
+    n = sparse_matrix.shape[0]
+    ones = np.ones(n)
+    row_sums = sparse_matrix.dot(ones)
+    sparse_correction = spsp.spdiags(row_sums, [0], n, n).tocsc()
+    markovized_matrix = sparse_matrix - sparse_correction
+    error_message = 'Matrix is not Markovian'
+    absolute_error = np.linalg.norm(markovized_matrix.dot(ones))
+    relative_error = absolute_error / np.linalg.norm(ones)
+    assert relative_error < 1e-12, error_message
+
+
+def opposite_charge_epistatic_matrix(parameters):
+    D = independent_dicodon_matrix(parameters)
+    row_indices, column_indices = get_row_and_column_indices(D)
+    codon_1_from = row_indices // 61
+    codon_2_from = row_indices % 61
+    codon_1_to = column_indices // 61
+    codon_2_to = column_indices % 61
+    charge_index_array = np.array([
+        aa_charges[cod2aa[codon]]
+        for codon in sense_codons
+    ], dtype='<U1')
+    codon_1_from_state = charge_index_array[codon_1_from]
+    codon_2_from_state = charge_index_array[codon_2_from]
+    codon_1_to_state = charge_index_array[codon_1_to]
+    codon_2_to_state = charge_index_array[codon_2_to]
+
+    # From unfavored states
+    from_plus_neutral  = (codon_1_from_state == '+') & (codon_2_from_state == 'n')
+    from_plus_plus = (codon_1_from_state == '+') & (codon_2_from_state == '+')
+    from_neutral_plus = (codon_1_from_state == 'n') & (codon_2_from_state == '+')
+    from_minus_neutral = (codon_1_from_state == '-') & (codon_2_from_state == 'n')
+    from_neutral_minus = (codon_1_from_state == 'n') & (codon_2_from_state == '-')
+    from_minus_minus = (codon_1_from_state == 'n') & (codon_2_from_state == '-')
+    from_unfavored = from_plus_neutral | from_plus_plus | from_neutral_plus \
+        | from_minus_neutral | from_neutral_minus | from_minus_minus
+
+    # From favored states
+    from_plus_minus = (codon_1_from_state == '+') & (codon_2_from_state == '-')
+    from_minus_plus = (codon_1_from_state == '-') & (codon_2_from_state == '+')
+    from_neutral_neutral = (codon_1_from_state == 'n') & (codon_2_from_state == 'n')
+    from_favored = from_plus_minus | from_minus_plus | from_neutral_neutral
+
+    # To unfavored states
+    to_plus_neutral  = (codon_1_to_state == '+') & (codon_2_to_state == 'n')
+    to_plus_plus = (codon_1_to_state == '+') & (codon_2_to_state == '+')
+    to_neutral_plus = (codon_1_to_state == 'n') & (codon_2_to_state == '+')
+    to_minus_neutral = (codon_1_to_state == '-') & (codon_2_to_state == 'n')
+    to_neutral_minus = (codon_1_to_state == 'n') & (codon_2_to_state == '-')
+    to_minus_minus = (codon_1_to_state == 'n') & (codon_2_to_state == '-')
+    to_unfavored = to_plus_neutral | to_plus_plus | to_neutral_plus \
+        | to_minus_neutral | to_neutral_minus | to_minus_minus
+
+    # To favored states
+    to_plus_minus = (codon_1_to_state == '+') & (codon_2_to_state == '-')
+    to_minus_plus = (codon_1_to_state == '-') & (codon_2_to_state == '+')
+    to_neutral_neutral = (codon_1_to_state == 'n') & (codon_2_to_state == 'n')
+    to_favored = to_plus_minus | to_minus_plus | to_neutral_neutral
+
+    from_unfavored_to_favored = from_unfavored & to_favored
+    from_favored_to_unfavored = from_favored & to_unfavored
+
+    D.data[from_unfavored_to_favored] *= parameters['epsilon']
+    D.data[from_favored_to_unfavored] /= parameters['epsilon']
+
+    return D
+
 
 if __name__ == '__main__':
     #harvest_results(['data/simulate-0/gtr.json', 'data/simulate-1/gtr.json'], 'results.csv')
     parameters = load_parameters()[0]
-    tree_path = 'data/simulate-0/tree.new'
-    alignment_path = 'data/simulate-0/mg94.fasta'
-    gtr_path = 'data/simulate-0/gtr_to_mg94.json'
-    output_json_path = 'output.json'
+    D = opposite_charge_epistatic_matrix(parameters)
+    #tree_path = 'data/simulate-0/tree.new'
+    #alignment_path = 'data/simulate-0/mg94.fasta'
+    #gtr_path = 'data/simulate-0/gtr_to_mg94.json'
+    #output_json_path = 'output.json'
     #alignment, seq_dict, tree = read_alignment_and_tree(
     #    alignment_path, tree_path, False
     #)
-    write_fit_mg94(alignment_path, tree_path, gtr_path, output_json_path)
+    #write_fit_mg94(alignment_path, tree_path, gtr_path, output_json_path)
     #node_dict = build_node_dict(tree)
     #parameters['seq_dict'] = seq_dict
     #parameters['node_dict'] = node_dict
