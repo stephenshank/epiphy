@@ -36,7 +36,11 @@ def load_parameters():
 
 
 nucleotides = np.array(['A', 'C', 'G', 'T'], dtype='<U1')
-nuc2ind = { 'A': 0, 'C': 1, 'G': 2, 'T': 3 }
+nuc2ind = { 
+    'A': 0, 'C': 1, 'G': 2, 'T': 3, '-': 4, 'R': 4, 'Y': 4,
+    'S': 4, 'W': 4, 'K': 4, 'M': 4, 'B': 4, 'D': 4, 'H': 4,
+    'V': 4, 'N': 4
+}
 codons = [''.join(c) for c in it.product(nucleotides, repeat=3)]
 stop_codons = ['TAA', 'TAG', 'TGA']
 sense_codons = [c for c in codons if not c in stop_codons]
@@ -281,6 +285,12 @@ def read_alignment_and_tree(alignment_path, tree_path, is_codon=True):
     with open(tree_path) as tree_file:
         tree_string = tree_file.read()
     tree = Tree(tree_string, format=1)
+    header_hash = set(headers)
+    for node in tree.traverse('postorder'):
+        error_message = 'Header in tree not found in alignment... aborting!'
+        if node.is_leaf():
+            assert node.name in header_hash, error_message
+
     tree_hash = set([node.name for node in tree.traverse('postorder')])
     seq_dict = {}
     for i, header in enumerate(headers):
@@ -388,7 +398,10 @@ def gtr_prune(parameters, tree, branch_lengths=None):
     for node in tree.traverse('postorder'):
         node_index = get_node_index(parameters, node)
         if node.is_leaf():
-            L[seq_dict[node.name], all_sequence_indices, node_index] = 1
+            encoded_sequence = seq_dict[node.name]
+            ambigs = encoded_sequence == 4
+            L[encoded_sequence[~ambigs], all_sequence_indices[~ambigs], node_index] = 1
+            L[:, all_sequence_indices[ambigs], node_index] = .25
         else:
             for i, child in enumerate(node.children):
                 child_index = get_node_index(parameters, child)
@@ -459,7 +472,7 @@ def build_gtr_likelihood(alignment, seq_dict, tree, verbosity=0):
     return likelihood
 
 
-def gtr_vector2dict(x, node_dict):
+def gtr_vector2dict(x, node_dict, alignment):
     parameters = {}
     parameters['AC'] = x[0]
     parameters['AG'] = 1
@@ -467,6 +480,10 @@ def gtr_vector2dict(x, node_dict):
     parameters['CG'] = x[2]
     parameters['CT'] = x[3]
     parameters['GT'] = x[4]
+    freq = position_specific_empirical_nucleotide_frequencies(alignment)
+    for nuc in range(freq.shape[0]):
+        for pos in range(freq.shape[1]):
+            parameters[ef_key(nuc, pos)] = freq[nuc, pos]
     for node_name, node_index in node_dict.items():
         parameters[node_name] = x[node_index]
     return parameters
@@ -557,8 +574,9 @@ def write_fit_gtr(input_alignment_path, input_tree_path, output_json_path, metho
         x = gtr_lbfgs(alignment, tree, seq_dict)
     else:
         x, history = gtr_coordinate_descent(alignment, tree, seq_dict, 1, 1)
+
     node_dict = build_node_dict(tree)
-    result = gtr_vector2dict(x, node_dict)
+    result = gtr_vector2dict(x, node_dict, alignment)
     if not history is None:
         result['history'] = history
     with open(output_json_path, 'w') as json_file:
@@ -740,7 +758,7 @@ def markovize(sparse_matrix):
     assert relative_error < 1e-12, error_message
 
 
-def opposite_charge_epistatic_matrix(parameters):
+def epistatic_matrix(parameters, favored_state_key='no_positives'):
     D = independent_dicodon_matrix(parameters)
     row_indices, column_indices = get_row_and_column_indices(D)
     codon_1_from = row_indices // 61
@@ -755,39 +773,27 @@ def opposite_charge_epistatic_matrix(parameters):
     codon_2_from_state = charge_index_array[codon_2_from]
     codon_1_to_state = charge_index_array[codon_1_to]
     codon_2_to_state = charge_index_array[codon_2_to]
+    all_favored_states = {
+        'no_positives': [
+            ('-', '-'), ('n', '-'), ('-', 'n'), ('n', 'n')
+        ]
+    }
+    favored_states = all_favored_states[favored_state_key]
 
-    # From unfavored states
-    from_plus_neutral  = (codon_1_from_state == '+') & (codon_2_from_state == 'n')
-    from_plus_plus = (codon_1_from_state == '+') & (codon_2_from_state == '+')
-    from_neutral_plus = (codon_1_from_state == 'n') & (codon_2_from_state == '+')
-    from_minus_neutral = (codon_1_from_state == '-') & (codon_2_from_state == 'n')
-    from_neutral_minus = (codon_1_from_state == 'n') & (codon_2_from_state == '-')
-    from_minus_minus = (codon_1_from_state == 'n') & (codon_2_from_state == '-')
-    from_unfavored = from_plus_neutral | from_plus_plus | from_neutral_plus \
-        | from_minus_neutral | from_neutral_minus | from_minus_minus
+    from_favored = np.array(len(row_indices)*[False])
+    for state in favored_states:
+        from_1 = codon_1_from_state == state[0]
+        from_2 = codon_2_from_state == state[1]
+        from_favored = from_favored | (from_1 & from_2)
+    from_unfavored = ~from_favored
 
-    # From favored states
-    from_plus_minus = (codon_1_from_state == '+') & (codon_2_from_state == '-')
-    from_minus_plus = (codon_1_from_state == '-') & (codon_2_from_state == '+')
-    from_neutral_neutral = (codon_1_from_state == 'n') & (codon_2_from_state == 'n')
-    from_favored = from_plus_minus | from_minus_plus | from_neutral_neutral
-
-    # To unfavored states
-    to_plus_neutral  = (codon_1_to_state == '+') & (codon_2_to_state == 'n')
-    to_plus_plus = (codon_1_to_state == '+') & (codon_2_to_state == '+')
-    to_neutral_plus = (codon_1_to_state == 'n') & (codon_2_to_state == '+')
-    to_minus_neutral = (codon_1_to_state == '-') & (codon_2_to_state == 'n')
-    to_neutral_minus = (codon_1_to_state == 'n') & (codon_2_to_state == '-')
-    to_minus_minus = (codon_1_to_state == 'n') & (codon_2_to_state == '-')
-    to_unfavored = to_plus_neutral | to_plus_plus | to_neutral_plus \
-        | to_minus_neutral | to_neutral_minus | to_minus_minus
-
-    # To favored states
-    to_plus_minus = (codon_1_to_state == '+') & (codon_2_to_state == '-')
-    to_minus_plus = (codon_1_to_state == '-') & (codon_2_to_state == '+')
-    to_neutral_neutral = (codon_1_to_state == 'n') & (codon_2_to_state == 'n')
-    to_favored = to_plus_minus | to_minus_plus | to_neutral_neutral
-
+    to_favored = np.array(len(row_indices)*[False])
+    for state in favored_states:
+        to_1 = codon_1_to_state == state[0]
+        to_2 = codon_2_to_state == state[1]
+        to_favored = to_favored | (to_1 & to_2)
+    to_unfavored = ~to_favored
+    
     from_unfavored_to_favored = from_unfavored & to_favored
     from_favored_to_unfavored = from_favored & to_unfavored
 
@@ -839,7 +845,7 @@ def simulate_epifel(parameters, tree, seed=1):
     seq_dict = {}
     records = []
     root = simulate_epifel_root(parameters)
-    Q = opposite_charge_epistatic_matrix(parameters).transpose().tocsc()
+    Q = epistatic_matrix(parameters).transpose().tocsc()
     for node in tree.traverse('preorder'):
         if node.is_root():
             seq_dict[node.name] = root
@@ -865,27 +871,91 @@ def write_epifel_simulation(input_tree_path, alignment_path, parameters):
     SeqIO.write(records, alignment_path, 'fasta')
 
 
-if __name__ == '__main__':
-    #harvest_results(['data/simulate-0/gtr.json', 'data/simulate-1/gtr.json'], 'results.csv')
-    parameters = load_parameters()[19]
-    #D = opposite_charge_epistatic_matrix(parameters)
-    alignment_path = 'data/simulate-0/mg94.fasta'
-    tree_path = 'data/simulate-0/tree.new'
+def epifel_prune(parameters, tree):
+    Q = epistatic_matrix(parameters)
+    number_of_sequences = len(tree.get_leaves())
+    L = np.zeros((61, 2*number_of_sequences-1))
+    seq_dict = parameters['seq_dict']
+    for node in tree.traverse('postorder'):
+        node_index = get_node_index(parameters, node)
+        if node.is_leaf():
+            L[seq_dict[node.name], node_index] = 1
+        else:
+            for i, child in enumerate(node.children):
+                child_index = get_node_index(parameters, child)
+                t = node.dist
+                P = expm(t*Q)
+                if i == 0:
+                    L[:, node_index] = krylov_subpace_exponential(t*Q, L[:, child_index])
+                else:
+                    L[:, node_index] *= krylov_subpace_exponential(t*Q, L[:, child_index])
+        if node.is_root():
+            pi = f3x4(parameters)
+            l0 = np.dot(np.kron(pi, pi), L[:, node_index])
+            return np.sum(np.log(l0))
+
+
+def build_epifel_likelihood(seq_dict, tree, verbosity=0):
+    node_dict = build_node_dict(tree)
+    def likelihood(x):
+        parameters = {
+            'seq_dict': seq_dict,
+            'node_dict': node_dict
+        }
+        for nuc in range(4):
+            for pos in range(3):
+                parameters[ef_key(nuc, pos)] = freq[nuc, pos]
+        parameters['omega'] = x[0]
+        parameters['epsilon'] = x[1]
+        l = epifel_prune(parameters, tree)
+        if verbosity > 0:
+            print('Log likelihood:', l)
+        if verbosity > 1:
+            for k, v in parameters.items():
+                print('%s: %s\n' % (str(k), str(v)))
+            print('\n----------\n')
+        return l
+    return likelihood
+
+
+def epifel_lbfgs(tree, seq_dict, gtr_result, niter=100, verbosity=0):
+    def callback(x):
+        print('Iteration...')
+    likelihood = build_epifel_likelihood(seq_dict, tree, verbosity)
+    x0 = get_initial_mg94_guess(seq_dict, tree, gtr_result)
+    bounds = len(x0) * [(0, np.inf)]
+    result = fmin_l_bfgs_b(minusf(likelihood), x0, approx_grad=True, bounds=bounds, callback=callback)
+    return result[0]
+
+
+def write_fit_epifel(input_alignment_path, input_tree_path, input_gtr_json_path,
+        codon1, codon2, output_json_path, method='lbfgs'):
     alignment, seq_dict, tree = read_alignment_and_tree(
-        alignment_path, tree_path, False
+        input_alignment_path, input_tree_path
     )
-    simulate_epifel(parameters, tree)
-    #gtr_path = 'data/simulate-0/gtr_to_mg94.json'
-    #output_json_path = 'output.json'
-    #write_fit_mg94(alignment_path, tree_path, gtr_path, output_json_path)
-    #node_dict = build_node_dict(tree)
-    #parameters['seq_dict'] = seq_dict
-    #parameters['node_dict'] = node_dict
-    #likelihood = build_gtr_likelihood(alignment, seq_dict, tree, verbosity=1)
-    #x0 = get_initial_gtr_guess(seq_dict, tree)
-    #f_0 = coordinate_objective(likelihood, x0, 1)
-    #print('True likelihood:', gtr_prune(parameters, tree))
-    #x, history = fit_gtr(alignment, tree, 1, 1)
-    #result = gtr_vector2dict(x, node_dict)
-    #likelihood = build_gtr_likelihood(alignment, seq_dict, tree)
-    #x = maximize(likelihood, x0, options={'maxiter': 1000})
+    for sequence in seq_dict.values:
+        sequence = sequence[[codon1, codon2]]
+    with open(input_gtr_json_path) as json_file:
+        gtr_result = json.load(json_file)
+    synchronize_tree_and_results(tree, gtr_result)
+    x = epifel_lbfgs(tree, seq_dict, gtr_result)
+    node_dict = build_node_dict(tree)
+    result = mg94_vector2dict(x, node_dict)
+    with open(output_json_path, 'w') as json_file:
+        json.dump(result, json_file, indent=2)
+
+
+if __name__ == '__main__':
+    pass
+    #alignment_path = 'data/empirical/v3small.fasta'
+    #tree_path = 'data/empirical/v3small.new'
+    #output_json = 'output.json'
+    #write_fit_gtr(alignment_path, tree_path, output_json)
+
+    #alignment_path = 'data/simulate-0/gtr.fasta'
+    #tree_path = 'data/simulate-0/tree.new'
+    #output_json = 'output.json'
+    #write_fit_gtr(alignment_path, tree_path, output_json)
+
+    #parameters = load_parameters()[0]
+    #epistatic_matrix(parameters)

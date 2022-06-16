@@ -117,6 +117,15 @@ rule simulated_epifel_fna:
   shell:
     "cat {input.alignment} {input.tree} > {output}"
 
+rule empirical_gtr_fit:
+  input:
+    alignment="data/empirical/{empirical}.fasta",
+    tree="data/empirical/{empirical}.new"
+  output:
+    "data/empirical/{empirical}-gtr.json"
+  run:
+    write_fit_gtr(input.alignment, input.tree, output[0])
+
 rule all:
   input:
     rules.gtr_fits.output[0],
