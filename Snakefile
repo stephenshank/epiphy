@@ -10,6 +10,13 @@ def params_from_wc(wc):
   return parameters[int(wc)]
 
 
+rule extract_parameters:
+  output:
+    "data/simulate-{sim}/parameters.json"
+  run:
+    with open(output[0], 'w') as json_file:
+      json.dump(params_from_wc(wildcards.sim), json_file, indent=2)
+
 rule gtr_fits:
   input:
     expand("data/simulate-{sim}/gtr_to_gtr.json", sim=range(len(parameters)))
@@ -117,6 +124,15 @@ rule simulated_epifel_fna:
   shell:
     "cat {input.alignment} {input.tree} > {output}"
 
+rule fit_epifel_to_epifel:
+  input:
+    alignment=rules.filter_out_interior_epifel_nodes.output[0],
+    tree=rules.simulate_tree.output[0]
+  output:
+    "data/simulate-{sim}/epifel.json"
+  run:
+    write_fit_epifel(input.alignment, input.tree, 0, 1, output[0])
+
 rule empirical_gtr_fit:
   input:
     alignment="data/empirical/{empirical}.fasta",
@@ -156,6 +172,9 @@ rule empirical_charge_counts:
   run:
     count_charge_pairs(input[0], output[0], wildcards.codon1, wildcards.codon2)
     
+rule all_epifel_simulations:
+  input:
+    expand("data/simulate-{sim}/epifel.fasta", sim=range(len(parameters)))
 
 rule all:
   input:
