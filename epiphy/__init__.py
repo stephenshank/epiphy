@@ -2,6 +2,7 @@ import json
 import itertools as it
 import csv
 from collections import Counter
+import sys
 
 import numpy as np
 import scipy.sparse as spsp
@@ -12,8 +13,10 @@ from scipy.optimize import fmin_l_bfgs_b
 from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
-from ete3 import PhyloTree
 from ete3 import Tree
+from joblib import Parallel, delayed
+
+np.seterr(all='raise')
 
 
 def autotype(parameters):
@@ -301,9 +304,9 @@ def read_alignment_and_tree(alignment_path, tree_path, is_codon=True):
     tree = Tree(tree_string, format=1)
     header_hash = set(headers)
     for node in tree.traverse('postorder'):
-        error_message = 'Header in tree not found in alignment... aborting!'
+        error_message = 'Header %s in tree not found in alignment... aborting!'
         if node.is_leaf():
-            assert node.name in header_hash, error_message
+            assert node.name in header_hash, error_message % node.name
 
     tree_hash = set([node.name for node in tree.traverse('postorder')])
     seq_dict = {}
@@ -639,6 +642,8 @@ def mg94_prune(parameters, tree):
                     L[:, :, node_index] = np.dot(P, L[:, :, child_index])
                 else:
                     L[:, :, node_index] *= np.dot(P, L[:, :, child_index])
+            if np.linalg.norm(L[:, :, node_index], 'fro') == 0:
+                pass
         if node.is_root():
             pi = f3x4(parameters)
             l0 = np.dot(pi, L[:, :, node_index])
@@ -837,6 +842,7 @@ def krylov_subpace_exponential(A, b, iter=50):
             w = w - H[i, j] * V[:, i]
         H[j+1, j] = np.linalg.norm(w)
         if np.abs(H[j+1, j]) < 1e-12:
+            print('Krylov iterations terminating early...')
             e = np.zeros(j)
             e[0] = 1
             x = beta*np.dot(V[:, :j], np.dot(expm(H[:j, :j]), e) )
@@ -894,7 +900,7 @@ def write_epifel_simulation(input_tree_path, alignment_path, parameters):
 def epifel_prune(parameters, tree):
     Q = epistatic_matrix(parameters)
     number_of_sequences = len(tree.get_leaves())
-    L = np.zeros((61, 2*number_of_sequences-1))
+    L = np.zeros((61**2, 2*number_of_sequences-1))
     seq_dict = parameters['seq_dict']
     for node in tree.traverse('postorder'):
         node_index = get_node_index(parameters, node)
@@ -904,27 +910,29 @@ def epifel_prune(parameters, tree):
             for i, child in enumerate(node.children):
                 child_index = get_node_index(parameters, child)
                 t = node.dist
-                P = expm(t*Q)
                 if i == 0:
-                    L[:, node_index] = krylov_subpace_exponential(t*Q, L[:, child_index])
+                    if node.dist < 1e-10:
+                        L[:, node_index] = L[:, child_index]
+                    else:
+                        L[:, node_index] = krylov_subpace_exponential(t*Q, L[:, child_index])
                 else:
-                    L[:, node_index] *= krylov_subpace_exponential(t*Q, L[:, child_index])
+                    if node.dist < 1e-10:
+                        L[:, node_index] *= L[:, child_index]
+                    else:
+                        L[:, node_index] *= krylov_subpace_exponential(t*Q, L[:, child_index])
         if node.is_root():
             pi = f3x4(parameters)
             l0 = np.dot(np.kron(pi, pi), L[:, node_index])
             return np.sum(np.log(l0))
 
 
-def build_epifel_likelihood(seq_dict, tree, verbosity=0):
+def build_epifel_likelihood(seq_dict, tree, gtr_result, verbosity=0):
     node_dict = build_node_dict(tree)
     def likelihood(x):
-        parameters = {
+        parameters = gtr_result | {
             'seq_dict': seq_dict,
             'node_dict': node_dict
         }
-        for nuc in range(4):
-            for pos in range(3):
-                parameters[ef_key(nuc, pos)] = freq[nuc, pos]
         parameters['omega'] = x[0]
         parameters['epsilon'] = x[1]
         l = epifel_prune(parameters, tree)
@@ -934,6 +942,7 @@ def build_epifel_likelihood(seq_dict, tree, verbosity=0):
             for k, v in parameters.items():
                 print('%s: %s\n' % (str(k), str(v)))
             print('\n----------\n')
+        print(x, l)
         return l
     return likelihood
 
@@ -941,8 +950,9 @@ def build_epifel_likelihood(seq_dict, tree, verbosity=0):
 def epifel_lbfgs(tree, seq_dict, gtr_result, niter=100, verbosity=0):
     def callback(x):
         print('Iteration...')
-    likelihood = build_epifel_likelihood(seq_dict, tree, verbosity)
-    x0 = get_initial_mg94_guess(seq_dict, tree, gtr_result)
+    likelihood = build_epifel_likelihood(seq_dict, tree, gtr_result, verbosity)
+    x0 = np.ones(2)
+    print('likelihood:', likelihood(x0))
     bounds = len(x0) * [(0, np.inf)]
     result = fmin_l_bfgs_b(minusf(likelihood), x0, approx_grad=True, bounds=bounds, callback=callback)
     return result[0]
@@ -960,12 +970,37 @@ def write_fit_epifel(input_alignment_path, input_tree_path, input_gtr_json_path,
     alignment, seq_dict, tree = read_alignment_and_tree(
         input_alignment_path, input_tree_path
     )
+    for value in seq_dict.values():
+        value = 61*value[0] + value[1]
     with open(input_gtr_json_path) as json_file:
         gtr_result = json.load(json_file)
-    synchronize_tree_and_results(tree, gtr_result)
+    #synchronize_tree_and_results(tree, gtr_result)
     x = epifel_lbfgs(tree, seq_dict, gtr_result)
     node_dict = build_node_dict(tree)
-    result = mg94_vector2dict(x, node_dict)
+    with open(output_json_path, 'w') as json_file:
+        json.dump(list(result), json_file, indent=2)
+
+
+def epifel_grid(input_alignment_path, input_tree_path, input_gtr_json_path,
+        codon1, codon2, output_json_path, method='lbfgs'):
+    alignment, seq_dict, tree = read_alignment_and_tree(
+        input_alignment_path, input_tree_path
+    )
+    for value in seq_dict.values():
+        value = 61*value[0] + value[1]
+    with open(input_gtr_json_path) as json_file:
+        gtr_result = json.load(json_file)
+    #synchronize_tree_and_results(tree, gtr_result)
+    likelihood = build_epifel_likelihood(seq_dict, tree, gtr_result)
+    omegas = np.linspace(.1, 3, 10)
+    epsilons = np.linspace(.1, 3, 15)
+    xv, yv = np.meshgrid(omegas, epsilons)
+    gridpoints = list(zip(xv.flatten(), yv.flatten()))
+    likelihoods = Parallel(n_jobs=10)(delayed(likelihood)(gp) for gp in gridpoints)
+    result = {
+        'gridpoints': gridpoints,
+        'likelihoods': likelihoods
+    }
     with open(output_json_path, 'w') as json_file:
         json.dump(result, json_file, indent=2)
 
@@ -1020,16 +1055,18 @@ def count_charge_pairs(input_alignment_path, output_json_path, col1, col2):
 
 
 if __name__ == '__main__':
-    alignment_path = 'data/empirical/v3small.fasta'
-    tree_path = 'data/empirical/v3small.new'
-    gtr_path = 'data/empirical/v3small-gtr.json'
-    count_charge_pairs(alignment_path, 'charge.json', 10, 26)
+    alignment_path = 'data/simulate-0/epifel.fasta'
+    tree_path = 'data/simulate-0/tree.new'
+    gtr_path = 'data/simulate-0/parameters.json'
+    epifel_grid(alignment_path, tree_path, gtr_path,
+        0, 1, 'result.json', method='lbfgs')
+    #count_charge_pairs(alignment_path, 'charge.json', 10, 26)
     #write_fit_mg94_pair(alignment_path, tree_path, gtr_path, 10, 26, 'mg94.json')
 
     #alignment_path = 'data/simulate-0/gtr.fasta'
     #tree_path = 'data/simulate-0/tree.new'
     #output_json = 'output.json'
-    #write_fit_gtr(alignment_path, tree_path, output_json)
+    #write_fit_gtr(alignment_path, tree_path, gtr_path)
 
     #parameters = load_parameters()[0]
     #epistatic_matrix(parameters)
