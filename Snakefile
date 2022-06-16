@@ -126,6 +126,19 @@ rule empirical_gtr_fit:
   run:
     write_fit_gtr(input.alignment, input.tree, output[0])
 
+rule empirical_mg94_fit:
+  input:
+    alignment="data/empirical/{empirical}.fasta",
+    tree="data/empirical/{empirical}.new",
+    gtr="data/empirical/{empirical}-gtr.json"
+  output:
+    "data/empirical/{empirical}-{codon1}-{codon2}-mg94.json"
+  run:
+    write_fit_mg94_pair(
+      input.alignment, input.tree, input_gtr_json_path,
+      wildcards.codon1, wildcards.codon2, output[0]
+    )
+
 rule all:
   input:
     rules.gtr_fits.output[0],

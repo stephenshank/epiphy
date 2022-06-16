@@ -47,6 +47,7 @@ sense_codons = [c for c in codons if not c in stop_codons]
 dicodons = [d[0] + d[1] for d in it.product(sense_codons, sense_codons)]
 di2ind = {dicodon: i for i, dicodon in enumerate(dicodons)}
 cod2ind = {codon: i for i, codon in enumerate(sense_codons)}
+cod2ind['---'] = 61
 cod2aa = {codon: str(Seq(codon).translate()) for codon in sense_codons}
 aa_charges = {
     'R': '+', 'H': '+', 'K': '+', 'D': '-', 'E': '-',
@@ -191,8 +192,20 @@ def position_specific_empirical_nucleotide_frequencies(alignment, is_codon=False
     for nucleotide in range(4):
         for position in range(3):
             count = (alignment[:, position::3] == nucleotide).sum()
-            F[nucleotide, position] = count / total
+            nongaps = (alignment[:, position::3] != 4).sum()
+            F[nucleotide, position] = count / nongaps
+    error_message = 'Nucleotide frequencies at position %d do not sum to 1'
+    for i in range(3):
+        assert np.abs(F[:, i].sum() - 1) < 1e-8, error_message % (i+1)
     return F
+
+
+def freqs_to_pi_dict(freqs):
+    pi_dict = {}
+    for i, nuc in enumerate(nucleotides):
+        for pos in range(3):
+           pi_dict[ef_key(nuc, pos)] = freqs[i, pos] 
+    return pi_dict
 
 
 def mg94_matrix(parameters):
@@ -616,7 +629,10 @@ def mg94_prune(parameters, tree):
     for node in tree.traverse('postorder'):
         node_index = get_node_index(parameters, node)
         if node.is_leaf():
-            L[seq_dict[node.name], all_sequence_indices, node_index] = 1
+            try:
+                L[seq_dict[node.name], all_sequence_indices, node_index] = 1
+            except:
+                import pdb; pdb.set_trace()
         else:
             for i, child in enumerate(node.children):
                 child_index = get_node_index(parameters, child)
@@ -632,19 +648,25 @@ def mg94_prune(parameters, tree):
             return np.sum(np.log(l0))
 
 
-def build_mg94_likelihood(alignment, seq_dict, tree, verbosity=0):
-    freq = position_specific_empirical_nucleotide_frequencies(alignment, True)
+def build_mg94_likelihood(alignment, seq_dict, tree, verbosity=0, gtr_result=None, pair=False):
+    if gtr_result is None:
+        freq = position_specific_empirical_nucleotide_frequencies(alignment, True)
     node_dict = build_node_dict(tree)
     def likelihood(x):
         parameters = {
             'number_of_sequences': alignment.shape[0],
-            'number_of_sites': alignment.shape[1],
+            'number_of_sites': alignment.shape[1] if not pair else 2,
             'seq_dict': seq_dict,
             'node_dict': node_dict
         }
         for nuc in range(4):
             for pos in range(3):
-                parameters[ef_key(nuc, pos)] = freq[nuc, pos]
+                key = ef_key(nuc, pos)
+                if gtr_result is None:
+                    parameters[key] = freq[nuc, pos]
+                else:
+                    parameters[key] = gtr_result[key]
+
         parameters['AC'] = x[0]
         parameters['AG'] = 1
         parameters['AT'] = x[1]
@@ -695,10 +717,10 @@ def get_initial_mg94_guess(seq_dict, tree, gtr_result):
     ])
 
 
-def mg94_lbfgs(alignment, tree, seq_dict, gtr_result, niter=100, verbosity=0):
+def mg94_lbfgs(alignment, tree, seq_dict, gtr_result, niter=100, verbosity=0, pair=False):
     def callback(x):
         print('Iteration...')
-    likelihood = build_mg94_likelihood(alignment, seq_dict, tree, verbosity)
+    likelihood = build_mg94_likelihood(alignment, seq_dict, tree, verbosity, gtr_result, pair=pair)
     x0 = get_initial_mg94_guess(seq_dict, tree, gtr_result)
     bounds = len(x0) * [(0, np.inf)]
     result = fmin_l_bfgs_b(minusf(likelihood), x0, approx_grad=True, bounds=bounds, callback=callback)
@@ -928,13 +950,18 @@ def epifel_lbfgs(tree, seq_dict, gtr_result, niter=100, verbosity=0):
     return result[0]
 
 
+def trim_alignment_and_seq_dict(alignment, seq_dict, codon1, codon2):
+    alignment = alignment[:, [codon1, codon2]]
+    for key, sequence in seq_dict.items():
+        sequence = sequence[[codon1, codon2]]
+        seq_dict[key] = sequence
+
+
 def write_fit_epifel(input_alignment_path, input_tree_path, input_gtr_json_path,
         codon1, codon2, output_json_path, method='lbfgs'):
     alignment, seq_dict, tree = read_alignment_and_tree(
         input_alignment_path, input_tree_path
     )
-    for sequence in seq_dict.values:
-        sequence = sequence[[codon1, codon2]]
     with open(input_gtr_json_path) as json_file:
         gtr_result = json.load(json_file)
     synchronize_tree_and_results(tree, gtr_result)
@@ -945,12 +972,29 @@ def write_fit_epifel(input_alignment_path, input_tree_path, input_gtr_json_path,
         json.dump(result, json_file, indent=2)
 
 
+def write_fit_mg94_pair(input_alignment_path, input_tree_path, input_gtr_json_path,
+        codon1, codon2, output_json_path, method='lbfgs'):
+    alignment, seq_dict, tree = read_alignment_and_tree(
+        input_alignment_path, input_tree_path
+    )
+    codon1 = int(codon1)
+    codon2 = int(codon1)
+    with open(input_gtr_json_path) as json_file:
+        gtr_result = json.load(json_file)
+    synchronize_tree_and_results(tree, gtr_result)
+    trim_alignment_and_seq_dict(alignment, seq_dict, codon1, codon2)
+    x = mg94_lbfgs(alignment, tree, seq_dict, gtr_result, pair=True)
+    node_dict = build_node_dict(tree)
+    result = mg94_vector2dict(x, node_dict)
+    with open(output_json_path, 'w') as json_file:
+        json.dump(result, json_file, indent=2)
+
+
 if __name__ == '__main__':
-    pass
-    #alignment_path = 'data/empirical/v3small.fasta'
-    #tree_path = 'data/empirical/v3small.new'
-    #output_json = 'output.json'
-    #write_fit_gtr(alignment_path, tree_path, output_json)
+    alignment_path = 'data/empirical/v3small.fasta'
+    tree_path = 'data/empirical/v3small.new'
+    gtr_path = 'data/empirical/v3small-gtr.json'
+    write_fit_mg94_pair(alignment_path, tree_path, gtr_path, 10, 26, 'mg94.json')
 
     #alignment_path = 'data/simulate-0/gtr.fasta'
     #tree_path = 'data/simulate-0/tree.new'
