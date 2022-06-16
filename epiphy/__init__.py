@@ -1,6 +1,7 @@
 import json
 import itertools as it
 import csv
+from collections import Counter
 
 import numpy as np
 import scipy.sparse as spsp
@@ -622,21 +623,17 @@ def mg94_prune(parameters, tree):
     Q = mg94_matrix(parameters)
     number_of_sites = parameters['number_of_sites']
     number_of_sequences = parameters['number_of_sequences']
-    S = parameters['S']
     L = np.zeros((61, number_of_sites, 2*number_of_sequences-1))
     all_sequence_indices = np.arange(number_of_sites)
     seq_dict = parameters['seq_dict']
     for node in tree.traverse('postorder'):
         node_index = get_node_index(parameters, node)
         if node.is_leaf():
-            try:
-                L[seq_dict[node.name], all_sequence_indices, node_index] = 1
-            except:
-                import pdb; pdb.set_trace()
+            L[seq_dict[node.name], all_sequence_indices, node_index] = 1
         else:
             for i, child in enumerate(node.children):
                 child_index = get_node_index(parameters, child)
-                t = S*child.dist
+                t = child.dist
                 P = expm(t*Q)
                 if i == 0:
                     L[:, :, node_index] = np.dot(P, L[:, :, child_index])
@@ -651,6 +648,8 @@ def mg94_prune(parameters, tree):
 def build_mg94_likelihood(alignment, seq_dict, tree, verbosity=0, gtr_result=None, pair=False):
     if gtr_result is None:
         freq = position_specific_empirical_nucleotide_frequencies(alignment, True)
+    else:
+        synchronize_tree_and_results(tree, gtr_result)
     node_dict = build_node_dict(tree)
     def likelihood(x):
         parameters = {
@@ -674,7 +673,6 @@ def build_mg94_likelihood(alignment, seq_dict, tree, verbosity=0, gtr_result=Non
         parameters['CT'] = x[3]
         parameters['GT'] = x[4]
         parameters['omega'] = x[5]
-        parameters['S'] = x[6]
         l = mg94_prune(parameters, tree)
         if verbosity > 0:
             print('Log likelihood:', l)
@@ -990,11 +988,43 @@ def write_fit_mg94_pair(input_alignment_path, input_tree_path, input_gtr_json_pa
         json.dump(result, json_file, indent=2)
 
 
+def count_charge_pairs(input_alignment_path, output_json_path, col1, col2):
+    col1 = int(col1)
+    col2 = int(col2)
+    res1 = Counter()
+    res2 = Counter()
+    respair = Counter()
+    res1charge = Counter()
+    res2charge = Counter()
+    paircharge = Counter()
+    for record in SeqIO.parse(input_alignment_path, 'fasta'):
+        seq = record.seq.translate()
+        r1 = str(seq[col1])
+        r2 = str(seq[col2])
+        res1[r1] += 1
+        res2[r2] += 1
+        respair[r1+r2] += 1
+        res1charge[aa_charges[r1]] += 1
+        res2charge[aa_charges[r2]] += 1
+        paircharge[aa_charges[r1] + aa_charges[r2]] += 1
+    with open(output_json_path, 'w') as json_file:
+        json.dump({
+            'res1': res1,
+            'res2': res2,
+            'respair': respair,
+            'res1charge': res1charge,
+            'res2charge': res2charge,
+            'paircharge': paircharge
+        }, json_file, indent=2)
+
+
+
 if __name__ == '__main__':
     alignment_path = 'data/empirical/v3small.fasta'
     tree_path = 'data/empirical/v3small.new'
     gtr_path = 'data/empirical/v3small-gtr.json'
-    write_fit_mg94_pair(alignment_path, tree_path, gtr_path, 10, 26, 'mg94.json')
+    count_charge_pairs(alignment_path, 'charge.json', 10, 26)
+    #write_fit_mg94_pair(alignment_path, tree_path, gtr_path, 10, 26, 'mg94.json')
 
     #alignment_path = 'data/simulate-0/gtr.fasta'
     #tree_path = 'data/simulate-0/tree.new'

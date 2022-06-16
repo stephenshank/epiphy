@@ -139,6 +139,24 @@ rule empirical_mg94_fit:
       wildcards.codon1, wildcards.codon2, output[0]
     )
 
+rule empirical_fna:
+  input:
+    alignment="data/empirical/{empirical}.fasta",
+    tree="data/empirical/{empirical}.new"
+  output:
+    "data/empirical/{empirical}.fna"
+  shell:
+    "cat {input.alignment} {input.tree} > {output}"
+
+rule empirical_charge_counts:
+  input:
+    "data/empirical/{empirical}.fasta",
+  output:
+    "data/empirical/{empirical}-charge_{codon1}_{codon2}.json"
+  run:
+    count_charge_pairs(input[0], output[0], wildcards.codon1, wildcards.codon2)
+    
+
 rule all:
   input:
     rules.gtr_fits.output[0],
